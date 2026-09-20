@@ -21,6 +21,14 @@ const API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 export const VISION_MODEL = process.env.GEMINI_VISION_MODEL || "gemma-4-31b-it";
 export const TEXT_MODEL = process.env.GEMINI_TEXT_MODEL || VISION_MODEL;
 
+// A free, newly-released open model like Gemma 4 sees uneven load and can
+// return 503 UNAVAILABLE ("high demand") for stretches of time. Gemini's
+// own hosted Flash models sit on much more heavily provisioned serving
+// infrastructure, so they make a good automatic fallback — still free tier,
+// just less likely to be capacity-constrained at the same moment.
+export const VISION_FALLBACK_MODEL = process.env.GEMINI_VISION_FALLBACK_MODEL || "gemini-2.0-flash";
+export const TEXT_FALLBACK_MODEL = process.env.GEMINI_TEXT_FALLBACK_MODEL || VISION_FALLBACK_MODEL;
+
 function apiKey(): string {
   const key = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
   if (!key) {
@@ -155,6 +163,28 @@ async function generateContent(
   throw new Error(`Gemini API error (${lastStatus}) for model ${model}: ${lastErrText.slice(0, 500)}`);
 }
 
+// Tries each model in order, moving on to the next only if the previous
+// one fails outright (wrong model name, overloaded, timed out, etc.).
+// Each model gets its own fresh timeout/budget from `opts` — deliberately
+// not split across models, since a second attempt against a *different*
+// backend is far more likely to succeed than repeating the same call
+// against the one that's already struggling.
+async function generateContentWithFallback(
+  models: string[],
+  parts: GeneratePart[],
+  opts: Parameters<typeof generateContent>[2] = {}
+): Promise<string> {
+  let lastErr: unknown;
+  for (const model of models) {
+    try {
+      return await generateContent(model, parts, opts);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
 // ---------------------------------------------------------------------
 // 1. Board digitization from a photo
 // ---------------------------------------------------------------------
@@ -219,8 +249,8 @@ export function parseDigitizeText(raw: string): DigitizeResult {
 }
 
 export async function digitizeBoardFromPhoto(imageBase64: string, mimeType: string): Promise<DigitizeResult> {
-  const text = await generateContent(
-    VISION_MODEL,
+  const text = await generateContentWithFallback(
+    Array.from(new Set([VISION_MODEL, VISION_FALLBACK_MODEL])),
     [
       { inlineData: { mimeType, data: imageBase64 } },
       { text: "この写真のオセロ盤面を読み取ってJSONで出力してください。" },
@@ -230,12 +260,14 @@ export async function digitizeBoardFromPhoto(imageBase64: string, mimeType: stri
       jsonMode: true,
       temperature: 0.1,
       // A 31B multimodal model can genuinely take 20-40s+ to process an
-      // image on shared free-tier capacity. Give it one long window
-      // instead of two short ones that each get aborted before finishing
-      // (which is what a fixed 15s timeout was doing in practice).
-      timeoutMs: 48_000,
-      overallBudgetMs: 48_000,
-      maxAttempts: 2,
+      // image on shared free-tier capacity, and can also 503 for stretches
+      // under high demand. Each model gets its own ~24s window (single
+      // attempt, no internal retry); if the primary is overloaded it
+      // typically fails fast, leaving most of the digitize route's 60s
+      // maxDuration for the fallback model to actually try.
+      timeoutMs: 24_000,
+      overallBudgetMs: 24_000,
+      maxAttempts: 1,
     }
   );
   return parseDigitizeText(text);
@@ -275,8 +307,15 @@ ${payload}
 
 補足: mode が "exact" の場合、この先両者が最善を尽くした場合の確定的な結果(終盤までの読み切り)です。"heuristic" の場合は簡易評価関数による概算です。features の各値は「手番側にとって良いほどプラス」になるよう正規化されています(mobilityDiff=着手可能数の差, frontierDiff=相手に取られにくい石の割合の差, discDiff=石数の差, cornerDiff=角の獲得数の差)。`;
 
-  return generateContent(TEXT_MODEL, [{ text: userText }], {
-    systemInstruction: EXPLAIN_SYSTEM,
-    temperature: 0.4,
-  });
+  return generateContentWithFallback(
+    Array.from(new Set([TEXT_MODEL, TEXT_FALLBACK_MODEL])),
+    [{ text: userText }],
+    {
+      systemInstruction: EXPLAIN_SYSTEM,
+      temperature: 0.4,
+      timeoutMs: 10_000,
+      overallBudgetMs: 10_000,
+      maxAttempts: 1,
+    }
+  );
 }
