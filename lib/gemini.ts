@@ -63,18 +63,57 @@ async function generateContent(
   }
 
   // The hosted Gemma endpoints occasionally return a bare 500 "Internal
-  // error" under load; that's transient, so retry a couple of times with
-  // backoff before giving up. Client errors (4xx, e.g. unknown model,
-  // bad request) are not retried since retrying can't fix those.
+  // error" under load, or hang; both are transient, so retry a couple of
+  // times with backoff before giving up. Client errors (4xx, e.g. unknown
+  // model, bad request) are not retried since retrying can't fix those.
+  //
+  // Crucially, the retry loop enforces its own overall time budget well
+  // under the route's `maxDuration`. Without this, a slow/hanging upstream
+  // call plus retries can run right up to Vercel's hard limit, which kills
+  // the function with an opaque platform-level 504 (FUNCTION_INVOCATION_TIMEOUT)
+  // instead of letting us return a clean JSON error (or, for the
+  // explanation call, fall back to the non-LLM text).
   const MAX_ATTEMPTS = 3;
+  const PER_ATTEMPT_TIMEOUT_MS = 15_000;
+  const OVERALL_BUDGET_MS = 25_000;
+  const startedAt = Date.now();
+
   let lastErrText = "";
   let lastStatus = 0;
+
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    const res = await fetch(`${API_BASE}/models/${model}:generateContent?key=${key}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+    if (Date.now() - startedAt > OVERALL_BUDGET_MS) {
+      throw new Error(
+        `Gemini API call for model ${model} exceeded its ${OVERALL_BUDGET_MS}ms time budget after ${attempt - 1} attempt(s). Last error: ${lastErrText.slice(0, 300)}`
+      );
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), PER_ATTEMPT_TIMEOUT_MS);
+    let res: Response;
+    try {
+      res = await fetch(`${API_BASE}/models/${model}:generateContent?key=${key}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      const timedOut = err instanceof Error && err.name === "AbortError";
+      lastStatus = 0;
+      lastErrText = timedOut
+        ? `request timed out after ${PER_ATTEMPT_TIMEOUT_MS}ms`
+        : err instanceof Error
+          ? err.message
+          : String(err);
+      if (attempt === MAX_ATTEMPTS) {
+        throw new Error(`Gemini API request failed for model ${model}: ${lastErrText}`);
+      }
+      await new Promise((r) => setTimeout(r, 400 * attempt));
+      continue;
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     if (res.ok) {
       const data = await res.json();

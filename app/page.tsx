@@ -125,7 +125,31 @@ export default function Home() {
 
   const [busy, setBusy] = useState<"digitize" | "evaluate" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [errorCopied, setErrorCopied] = useState(false);
   const [showCamera, setShowCamera] = useState(false);
+
+  function buildErrorReport(message: string): string {
+    return [
+      "[オセロ評価AI エラーレポート]",
+      `日時: ${new Date().toISOString()}`,
+      `内容: ${message}`,
+      `UA: ${typeof navigator !== "undefined" ? navigator.userAgent : "unknown"}`,
+      `URL: ${typeof window !== "undefined" ? window.location.href : "unknown"}`,
+    ].join("\n");
+  }
+
+  async function copyErrorReport() {
+    if (!error) return;
+    const report = buildErrorReport(error);
+    try {
+      await navigator.clipboard.writeText(report);
+      setErrorCopied(true);
+      setTimeout(() => setErrorCopied(false), 2000);
+    } catch {
+      // Clipboard API can be unavailable/blocked; the textarea below still
+      // lets the user select-all and copy manually.
+    }
+  }
 
   function startNewGame() {
     setConfirmedBoard(initialBoard());
@@ -388,7 +412,25 @@ export default function Home() {
       )}
 
       {error && (
-        <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded p-3">{error}</p>
+        <div className="text-sm bg-red-50 border border-red-200 rounded p-3 space-y-2">
+          <p className="text-red-600">{error}</p>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={copyErrorReport}
+              className="px-3 py-1 text-xs rounded border border-red-300 text-red-700 hover:bg-red-100"
+            >
+              {errorCopied ? "コピーしました" : "エラーログをコピー"}
+            </button>
+            <span className="text-xs text-red-400">コピーしてサポートに貼り付けられます</span>
+          </div>
+          <textarea
+            readOnly
+            value={buildErrorReport(error)}
+            onFocus={(e) => e.currentTarget.select()}
+            className="w-full text-xs font-mono bg-white border border-red-200 rounded p-2 h-24 resize-none"
+          />
+        </div>
       )}
 
       {analysis && result && (

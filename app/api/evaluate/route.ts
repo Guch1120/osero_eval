@@ -5,7 +5,7 @@ import { explainPosition, type ExplainInput } from "@/lib/gemini";
 import { logError, logInfo, logWarn } from "@/lib/logger";
 
 export const runtime = "nodejs";
-export const maxDuration = 30;
+export const maxDuration = 60;
 
 function fallbackExplanation(input: ExplainInput): string {
   const lead =

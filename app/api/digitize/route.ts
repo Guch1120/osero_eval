@@ -4,7 +4,7 @@ import { digitizeBoardFromPhoto } from "@/lib/gemini";
 import { logError, logInfo, logWarn } from "@/lib/logger";
 
 export const runtime = "nodejs";
-export const maxDuration = 30;
+export const maxDuration = 60;
 
 // Vercel's platform-level request body limit for serverless functions is
 // 4.5MB regardless of any app-level config. A base64-encoded photo is
