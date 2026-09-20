@@ -86,6 +86,11 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [errorCopied, setErrorCopied] = useState(false);
   const [showCamera, setShowCamera] = useState(false);
+  // For playing a real game side-by-side: hides the best-move highlight/
+  // text so the app doesn't hand you the answer while you're deciding your
+  // own move. Where you're *allowed* to move (the legal-move dots) stays
+  // visible either way — that's just the rules, not strategic advice.
+  const [showBestMove, setShowBestMove] = useState(true);
 
   function buildErrorReport(message: string): string {
     return [
@@ -195,7 +200,7 @@ export default function Home() {
       const res = await fetch("/api/evaluate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ board, mover }),
+        body: JSON.stringify({ board, mover, hideBestMoveHint: !showBestMove }),
       });
       const json = await safeJson(res);
       if (!res.ok) {
@@ -245,11 +250,21 @@ export default function Home() {
 
   return (
     <main className="max-w-xl mx-auto px-4 py-8 space-y-6">
-      <header>
+      <header className="space-y-2">
         <h1 className="text-2xl font-bold">オセロ評価AI</h1>
-        <p className="text-sm text-neutral-600 mt-1">
+        <p className="text-sm text-neutral-600">
           将棋の指し手評価AIのように、一手ごとに勝率と理由を確認できます。盤面のマスをタップして着手を入力するか、撮影して読み取れます。
         </p>
+        <label className="flex items-center gap-2 text-sm text-neutral-700 w-fit">
+          <input
+            type="checkbox"
+            checked={showBestMove}
+            onChange={(e) => setShowBestMove(e.target.checked)}
+            className="w-4 h-4"
+          />
+          最善手を表示する
+          <span className="text-xs text-neutral-400">(対戦しながら使う場合はオフに)</span>
+        </label>
       </header>
 
       <input
@@ -323,8 +338,10 @@ export default function Home() {
             board={displayBoard}
             editable={!!draftBoard}
             onCellClick={draftBoard ? cycleCell : undefined}
-            bestMove={draftBoard ? undefined : analysis?.best?.move ?? null}
-            candidateMoves={draftBoard ? undefined : analysis?.candidates.slice(1, 3).map((c) => c.move)}
+            bestMove={draftBoard || !showBestMove ? undefined : analysis?.best?.move ?? null}
+            candidateMoves={
+              draftBoard || !showBestMove ? undefined : analysis?.candidates.slice(1, 3).map((c) => c.move)
+            }
             legalMoveCells={moveEntryCells}
             onMoveCellClick={handleManualMove}
           />
@@ -447,7 +464,7 @@ export default function Home() {
               終盤の完全読み切りが計算量の上限に達したため、簡易評価にフォールバックしました。
             </p>
           )}
-          {analysis.best && (
+          {showBestMove && analysis.best && (
             <p className="text-sm">
               最善手候補:{" "}
               <span className="font-mono font-semibold">{analysis.best.notation}</span>

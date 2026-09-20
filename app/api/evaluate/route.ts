@@ -11,7 +11,7 @@ export async function POST(req: NextRequest) {
   const requestId = randomUUID();
   const startedAt = Date.now();
 
-  let body: { board?: number[]; mover?: number };
+  let body: { board?: number[]; mover?: number; hideBestMoveHint?: boolean };
   try {
     body = await req.json();
   } catch (err) {
@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "リクエストの形式が不正です。", requestId }, { status: 400 });
   }
 
-  const { board, mover } = body;
+  const { board, mover, hideBestMoveHint } = body;
   if (!Array.isArray(board) || board.length !== 64 || (mover !== 1 && mover !== 2)) {
     logWarn("evaluate", "invalid board/mover in request", { requestId, boardLength: board?.length, mover });
     return NextResponse.json(
@@ -52,7 +52,11 @@ export async function POST(req: NextRequest) {
     blackWinProbPct: Math.round(analysis.blackWinProb * 1000) / 10,
     whiteWinProbPct: Math.round(analysis.whiteWinProb * 1000) / 10,
     mode: analysis.mode,
-    bestMoveNotation: analysis.best?.notation ?? null,
+    // When the app is being used side-by-side during a live game, the
+    // user may want the win% and general commentary without the prose
+    // literally naming the best move — the board's own best-move highlight
+    // is suppressed client-side in that mode, so keep the text consistent.
+    bestMoveNotation: hideBestMoveHint ? null : analysis.best?.notation ?? null,
     topCandidates: analysis.candidates.slice(0, 3).map((c) => ({ notation: c.notation, score: c.score })),
     features: {
       mobilityDiff: Math.round(analysis.features.mobilityDiff),
