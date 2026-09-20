@@ -26,7 +26,16 @@ export const TEXT_MODEL = process.env.GEMINI_TEXT_MODEL || VISION_MODEL;
 // own hosted Flash models sit on much more heavily provisioned serving
 // infrastructure, so they make a good automatic fallback — still free tier,
 // just less likely to be capacity-constrained at the same moment.
-export const VISION_FALLBACK_MODEL = process.env.GEMINI_VISION_FALLBACK_MODEL || "gemini-2.0-flash";
+//
+// The fallback default is "gemini-flash-latest", Google's own moving alias
+// for "whatever the current recommended Flash model is" (they hot-swap it
+// on every Flash release, with a 2-week notice for breaking changes). We
+// deliberately do NOT hardcode a specific dated model name here (e.g.
+// "gemini-2.0-flash") — that name was retired mid-2026 and broke this
+// exact fallback path once already. Pinning a fallback to a moving target
+// is the right call for it specifically, since its only job is "some
+// current, reliable multimodal model", not reproducible output.
+export const VISION_FALLBACK_MODEL = process.env.GEMINI_VISION_FALLBACK_MODEL || "gemini-flash-latest";
 export const TEXT_FALLBACK_MODEL = process.env.GEMINI_TEXT_FALLBACK_MODEL || VISION_FALLBACK_MODEL;
 
 function apiKey(): string {

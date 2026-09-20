@@ -41,9 +41,9 @@ npm run dev
 ```
 
 `GOOGLE_API_KEY` は Google AI Studio の無料APIキーです。1日あたりの
-無料リクエスト枠があるモデル(Gemma 4 / Gemini 2.0 Flash など)を利用する
+無料リクエスト枠があるモデル(Gemma 4 / Gemini Flash など)を利用する
 前提で設計しています。読み取り精度が気になる場合は `.env.local` の
-`GEMINI_VISION_MODEL` を `gemini-2.0-flash` に変えるだけで切り替えられます
+`GEMINI_VISION_MODEL` を `gemini-flash-latest` に変えるだけで切り替えられます
 (コード変更不要)。Gemma 4ファミリーには `gemma-4-26b-a4b-it` のようなテキスト
 専用モデルもありますが、画像入力を受け付けないため `GEMINI_VISION_MODEL`
 には使えません(`gemma-4-31b-it` のようなマルチモーダル版を指定してください)。
@@ -55,8 +55,22 @@ APIキーを設定しなくても、「現在の盤面を手動入力」から�
 Gemmaのような無料の新しいオープンモデルは、需要が集中すると一時的に
 `503 UNAVAILABLE`(高負荷)を返すことがあります。そのため各APIコールは
 `GEMINI_VISION_FALLBACK_MODEL` / `GEMINI_TEXT_FALLBACK_MODEL`(デフォルトは
-どちらも `gemini-2.0-flash`)に自動的にフォールバックします。通常はこの
-デフォルトのままで問題ありません。
+どちらも `gemini-flash-latest`)に自動的にフォールバックします。
+
+**モデル名は固定の日付付き名称(`gemini-2.0-flash` など)ではなく
+`gemini-flash-latest` を使っています。** Googleは2026年に入ってから
+Flashモデルを`3.5`→`3.6`→`3.7`→`3.8`のように頻繁に更新しており、
+`gemini-2.0-flash`は2026年6月に廃止されました。`gemini-flash-latest`は
+Google自身が管理する「常に最新の推奨Flashモデルを指す」エイリアスなので、
+今後モデルが更新されても自動的に追従し、同じ廃止トラブルが起きません
+(破壊的変更がある場合はGoogleが2週間前に通知するとされています)。
+一方、Gemmaにはこの種のエイリアスが無いため、`GEMINI_VISION_MODEL`に
+指定した`gemma-4-31b-it`のようなバージョン名はいずれ廃止される可能性が
+あります。その場合も本アプリは自動的に`gemini-flash-latest`側にフォール
+バックするので動作は止まりませんが、Gemma優先で使い続けたい場合は
+[Google AI Studio](https://aistudio.google.com/)のモデル一覧で新しい
+Gemmaバージョンが出ていないか時々確認し、`GEMINI_VISION_MODEL` /
+`GEMINI_TEXT_MODEL` を更新してください。
 
 ## Vercelへのデプロイ
 
