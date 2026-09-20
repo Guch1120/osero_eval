@@ -230,6 +230,15 @@ export default function Home() {
         </p>
       </header>
 
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        className="hidden"
+        onChange={onPhotoChosen}
+      />
+
       {!confirmedBoard && !draftBoard && (
         <div className="flex flex-wrap gap-3">
           <button
@@ -237,6 +246,13 @@ export default function Home() {
             className="px-4 py-2 rounded bg-emerald-700 text-white font-semibold hover:bg-emerald-800"
           >
             初期配置から開始
+          </button>
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={busy === "digitize"}
+            className="px-4 py-2 rounded bg-emerald-700 text-white font-semibold hover:bg-emerald-800 disabled:opacity-50"
+          >
+            {busy === "digitize" ? "読み取り中..." : "今の盤面を撮影して開始"}
           </button>
           <button
             onClick={startManualEntry}
@@ -311,14 +327,6 @@ export default function Home() {
 
           {!draftBoard && confirmedBoard && (
             <div className="flex flex-wrap gap-3">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                capture="environment"
-                className="hidden"
-                onChange={onPhotoChosen}
-              />
               <button
                 onClick={() => fileInputRef.current?.click()}
                 disabled={busy === "digitize"}

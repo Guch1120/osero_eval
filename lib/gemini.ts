@@ -5,14 +5,20 @@
 // It is never used to compute the win probability itself — see lib/othello.ts.
 //
 // Works with both Gemini models (e.g. "gemini-2.0-flash") and Gemma models
-// (e.g. "gemma-3-27b-it"), which are both free-tier and share this same
+// (e.g. "gemma-4-31b-it"), which are both free-tier and share this same
 // REST endpoint. Switch models purely via env vars, no code changes needed.
+//
+// Default is Gemma 4 31B Instruct ("gemma-4-31b-it"), the multimodal
+// (text+image) member of the Gemma 4 family, since board digitization
+// needs image input. Gemma 4 also ships smaller text-only variants
+// (e.g. "gemma-4-26b-a4b-it") that are NOT multimodal — don't use those
+// for GEMINI_VISION_MODEL.
 
 import { BLACK, EMPTY, WHITE, type Board } from "./othello";
 
 const API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
-export const VISION_MODEL = process.env.GEMINI_VISION_MODEL || "gemma-3-27b-it";
+export const VISION_MODEL = process.env.GEMINI_VISION_MODEL || "gemma-4-31b-it";
 export const TEXT_MODEL = process.env.GEMINI_TEXT_MODEL || VISION_MODEL;
 
 function apiKey(): string {
