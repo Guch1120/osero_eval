@@ -7,12 +7,14 @@ import {
   type Board,
   type Player,
   initialBoard,
+  isGameOver,
   legalMoves,
   applyMove,
   analyzePosition,
   countDiscs,
   inferMover,
   moveToNotation,
+  nextMoverAfterMove,
   other,
 } from "../lib/othello";
 
@@ -39,6 +41,11 @@ assert(discs.black + discs.white === 5, "one move places one disc plus flips (5 
 
 const mover = inferMover(board, afterFirstMove);
 assert(mover === BLACK, `inferMover correctly detects black just moved (got ${mover})`);
+
+assert(
+  nextMoverAfterMove(afterFirstMove, BLACK) === WHITE,
+  "nextMoverAfterMove hands the turn to the opponent when they have a legal move"
+);
 
 const analysis = analyzePosition(afterFirstMove, WHITE);
 assert(analysis.candidates.length > 0, "analyzePosition finds candidate moves for white");
@@ -93,6 +100,36 @@ if (endgame) {
   );
 } else {
   console.log("Endgame sample: game ended before reaching 10 empty squares (skipped)");
+}
+
+// Play a full random game to actual completion using nextMoverAfterMove
+// itself to drive turn order (including passes), and confirm it always
+// terminates in a real game-over state with all 64 squares filled or no
+// moves left for either side, and returns null exactly there.
+{
+  let b = initialBoard();
+  let p: Player = BLACK;
+  let sawAPass = false;
+  let guard = 0;
+  let prevP: Player = p;
+  while (!isGameOver(b) && guard < 200) {
+    guard++;
+    const moves = legalMoves(b, p);
+    const m = moves[Math.floor(Math.random() * moves.length)];
+    b = applyMove(b, p, m);
+    const next = nextMoverAfterMove(b, p);
+    if (next === p) sawAPass = true;
+    prevP = p;
+    p = next ?? p; // if game just ended, next is null; loop condition will exit
+    if (next === null) break;
+  }
+  assert(isGameOver(b), `full random self-play reaches a true game-over state (guard=${guard})`);
+  assert(nextMoverAfterMove(b, prevP) === null, "nextMoverAfterMove returns null once the game is actually over");
+  const finalCounts = countDiscs(b);
+  assert(finalCounts.black + finalCounts.white + finalCounts.empty === 64, "final board still has exactly 64 squares");
+  console.log(
+    `Full game sample: guard=${guard} black=${finalCounts.black} white=${finalCounts.white} empty=${finalCounts.empty} sawAPass=${sawAPass}`
+  );
 }
 
 if (process.exitCode) {

@@ -11,8 +11,13 @@ import {
   WHITE,
   type Board,
   type Player,
+  applyMove,
+  countDiscs,
   initialBoard,
   inferMover,
+  isGameOver,
+  legalMoves,
+  nextMoverAfterMove,
   other,
 } from "@/lib/othello";
 
@@ -35,6 +40,16 @@ function playerLabel(p: Player): string {
   return p === BLACK ? "黒" : "白";
 }
 
+function DiscIcon({ color }: { color: Player }) {
+  return (
+    <span
+      className={`inline-block w-4 h-4 rounded-full align-middle ${
+        color === BLACK ? "bg-neutral-900" : "bg-white border border-neutral-400"
+      }`}
+    />
+  );
+}
+
 // Reads a fetch Response as JSON, but degrades gracefully when the body
 // isn't JSON at all (e.g. Vercel's own plain-text error pages for 5xx),
 // which would otherwise surface as an opaque "Unexpected token" parse error.
@@ -54,7 +69,12 @@ export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [confirmedBoard, setConfirmedBoard] = useState<Board | null>(null);
-  const [lastMover, setLastMover] = useState<Player | null>(null);
+  // Whose turn it is to move on confirmedBoard right now. Meaningful only
+  // once confirmedBoard is set; driven either by an actual applied move
+  // (manual entry — exact, via Othello's own turn/pass rules) or by a
+  // photo digitization round (inferred from the disc-count delta, with a
+  // manual override since a photo can't be 100% certain).
+  const [currentMover, setCurrentMover] = useState<Player>(BLACK);
   const [result, setResult] = useState<AnalysisResponse | null>(null);
 
   const [draftBoard, setDraftBoard] = useState<Board | null>(null);
@@ -92,7 +112,7 @@ export default function Home() {
 
   function startNewGame() {
     setConfirmedBoard(initialBoard());
-    setLastMover(null);
+    setCurrentMover(BLACK);
     setResult(null);
     setDraftBoard(null);
     setError(null);
@@ -101,7 +121,7 @@ export default function Home() {
   function startManualEntry() {
     const base = draftBoard ?? confirmedBoard ?? initialBoard();
     setDraftBoard([...base] as Board);
-    setDraftNextMover(confirmedBoard && lastMover ? other(lastMover) : BLACK);
+    setDraftNextMover(confirmedBoard ? other(currentMover) : BLACK);
     setMoverInferred(false);
     setDigitizeNotes(null);
     setError(null);
@@ -121,7 +141,7 @@ export default function Home() {
         setDraftNextMover(other(justMoved));
         setMoverInferred(true);
       } else {
-        setDraftNextMover(lastMover ? other(lastMover) : BLACK);
+        setDraftNextMover(other(currentMover));
         setMoverInferred(false);
       }
     } else {
@@ -168,26 +188,20 @@ export default function Home() {
     setDraftBoard(next);
   }
 
-  async function confirmAndEvaluate() {
-    if (!draftBoard) return;
+  async function runEvaluate(board: Board, mover: Player) {
     setError(null);
     setBusy("evaluate");
     try {
       const res = await fetch("/api/evaluate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ board: draftBoard, mover: draftNextMover }),
+        body: JSON.stringify({ board, mover }),
       });
       const json = await safeJson(res);
       if (!res.ok) {
         throw new Error(`${json.error || "評価に失敗しました。"}${json.requestId ? ` (ID: ${json.requestId})` : ""}`);
       }
-
-      setConfirmedBoard(draftBoard);
-      setLastMover(draftNextMover);
       setResult(json);
-      setDraftBoard(null);
-      setDigitizeNotes(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -195,15 +209,46 @@ export default function Home() {
     }
   }
 
+  async function confirmAndEvaluate() {
+    if (!draftBoard) return;
+    const board = draftBoard;
+    const mover = draftNextMover;
+    setConfirmedBoard(board);
+    setCurrentMover(mover);
+    setDraftBoard(null);
+    setDigitizeNotes(null);
+    await runEvaluate(board, mover);
+  }
+
+  // Manual move entry: click a legal-move cell to place `currentMover`'s
+  // disc there. The resulting board (flips included) and the next mover
+  // (including the Othello pass rule) are both exact — no photo/CV
+  // ambiguity — so the move applies immediately and evaluation for the
+  // new position runs automatically in the background.
+  function handleManualMove(index: number) {
+    if (!confirmedBoard) return;
+    const newBoard = applyMove(confirmedBoard, currentMover, index);
+    const next = nextMoverAfterMove(newBoard, currentMover);
+    setConfirmedBoard(newBoard);
+    setResult(null);
+    if (next === null) return; // game over, nothing to evaluate
+    setCurrentMover(next);
+    void runEvaluate(newBoard, next);
+  }
+
   const displayBoard = draftBoard ?? confirmedBoard;
   const analysis = result?.analysis;
+  const gameOver = confirmedBoard ? isGameOver(confirmedBoard) : false;
+  const moveEntryCells =
+    !draftBoard && confirmedBoard && !gameOver ? legalMoves(confirmedBoard, currentMover) : [];
+  const finalCounts = gameOver && confirmedBoard ? countDiscs(confirmedBoard) : null;
 
   return (
     <main className="max-w-xl mx-auto px-4 py-8 space-y-6">
       <header>
         <h1 className="text-2xl font-bold">オセロ評価AI</h1>
         <p className="text-sm text-neutral-600 mt-1">
-          将棋の指し手評価AIのように、一手ごとに盤面を撮影して勝率と理由を確認できます。
+          将棋の指し手評価AIのように、一手ごとに勝率と理由を確認できます。盤面のマスをタップして着手を入力するか、撮影して読み取れます。
         </p>
       </header>
 
@@ -253,13 +298,42 @@ export default function Home() {
 
       {displayBoard && (
         <section className="space-y-3">
+          {!draftBoard && confirmedBoard && (
+            <div className="flex items-center gap-2">
+              {gameOver && finalCounts ? (
+                <p className="font-semibold">
+                  対局終了: 黒{finalCounts.black} - 白{finalCounts.white}
+                  {finalCounts.black === finalCounts.white
+                    ? " (引き分け)"
+                    : finalCounts.black > finalCounts.white
+                      ? " 黒の勝ち"
+                      : " 白の勝ち"}
+                </p>
+              ) : (
+                <p className="flex items-center gap-2 font-medium">
+                  <span>現在の手番:</span>
+                  <DiscIcon color={currentMover} />
+                  <span>{playerLabel(currentMover)}</span>
+                </p>
+              )}
+            </div>
+          )}
+
           <BoardGrid
             board={displayBoard}
             editable={!!draftBoard}
             onCellClick={draftBoard ? cycleCell : undefined}
             bestMove={draftBoard ? undefined : analysis?.best?.move ?? null}
             candidateMoves={draftBoard ? undefined : analysis?.candidates.slice(1, 3).map((c) => c.move)}
+            legalMoveCells={moveEntryCells}
+            onMoveCellClick={handleManualMove}
           />
+
+          {!draftBoard && confirmedBoard && !gameOver && (
+            <p className="text-xs text-neutral-500">
+              緑の丸が付いたマスをタップすると、{playerLabel(currentMover)}の着手として盤面に反映されます。
+            </p>
+          )}
 
           {draftBoard && (
             <div className="space-y-2 text-sm">

@@ -114,6 +114,16 @@ export function isGameOver(board: Board): boolean {
   return legalMoves(board, BLACK).length === 0 && legalMoves(board, WHITE).length === 0;
 }
 
+// Who moves next after `moverJustPlayed` plays, applying the standard
+// Othello pass rule: if the opponent has no legal move, turn returns to
+// the same player; if neither does, the game is over (null).
+export function nextMoverAfterMove(board: Board, moverJustPlayed: Player): Player | null {
+  const opp = other(moverJustPlayed);
+  if (legalMoves(board, opp).length > 0) return opp;
+  if (legalMoves(board, moverJustPlayed).length > 0) return moverJustPlayed;
+  return null;
+}
+
 export function moveToNotation(move: number): string {
   const [r, c] = rc(move);
   return `${"abcdefgh"[c]}${r + 1}`;
