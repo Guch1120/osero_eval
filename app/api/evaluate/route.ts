@@ -1,6 +1,8 @@
+import { randomUUID } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { analyzePosition, BLACK, WHITE, type Board, type Player } from "@/lib/othello";
 import { explainPosition, type ExplainInput } from "@/lib/gemini";
+import { logError, logInfo, logWarn } from "@/lib/logger";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -20,22 +22,43 @@ function fallbackExplanation(input: ExplainInput): string {
 }
 
 export async function POST(req: NextRequest) {
+  const requestId = randomUUID();
+  const startedAt = Date.now();
+
   let body: { board?: number[]; mover?: number };
   try {
     body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "リクエストの形式が不正です。" }, { status: 400 });
+  } catch (err) {
+    logError("evaluate", "request body was not valid JSON", err, { requestId });
+    return NextResponse.json({ error: "リクエストの形式が不正です。", requestId }, { status: 400 });
   }
 
   const { board, mover } = body;
   if (!Array.isArray(board) || board.length !== 64 || (mover !== 1 && mover !== 2)) {
-    return NextResponse.json({ error: "board(64マス)と mover(1=黒 or 2=白)が必要です。" }, { status: 400 });
+    logWarn("evaluate", "invalid board/mover in request", { requestId, boardLength: board?.length, mover });
+    return NextResponse.json(
+      { error: "board(64マス)と mover(1=黒 or 2=白)が必要です。", requestId },
+      { status: 400 }
+    );
   }
   if (board.some((c) => c !== 0 && c !== 1 && c !== 2)) {
-    return NextResponse.json({ error: "board の値は 0(空), 1(黒), 2(白) のいずれかである必要があります。" }, { status: 400 });
+    logWarn("evaluate", "board contains invalid cell values", { requestId });
+    return NextResponse.json(
+      { error: "board の値は 0(空), 1(黒), 2(白) のいずれかである必要があります。", requestId },
+      { status: 400 }
+    );
   }
 
+  logInfo("evaluate", "request received", { requestId, mover });
+
   const analysis = analyzePosition(board as Board, mover as Player);
+  logInfo("evaluate", "analysis complete", {
+    requestId,
+    mode: analysis.mode,
+    emptyCount: analysis.emptyCount,
+    degradedToHeuristic: analysis.degradedToHeuristic,
+    elapsedMs: Date.now() - startedAt,
+  });
 
   const moverLabel = mover === BLACK ? "黒" : "白";
   const explainInput: ExplainInput = {
@@ -59,7 +82,9 @@ export async function POST(req: NextRequest) {
   let explanationSource: "llm" | "fallback" = "llm";
   try {
     explanation = await explainPosition(explainInput);
+    logInfo("evaluate", "explanation generated via LLM", { requestId, elapsedMs: Date.now() - startedAt });
   } catch (err) {
+    logError("evaluate", "LLM explanation failed, using fallback text", err, { requestId });
     explanationSource = "fallback";
     explanation = fallbackExplanation(explainInput);
   }
@@ -68,5 +93,6 @@ export async function POST(req: NextRequest) {
     analysis,
     explanation,
     explanationSource,
+    requestId,
   });
 }

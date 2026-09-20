@@ -33,17 +33,81 @@ function playerLabel(p: Player): string {
   return p === BLACK ? "黒" : "白";
 }
 
-function fileToBase64(file: File): Promise<{ data: string; mimeType: string }> {
+// Phone camera photos (often 4-12MB) are sent as base64 JSON, which adds
+// ~33% overhead and can exceed Vercel's ~4.5MB serverless request body
+// limit. That limit is enforced by the platform before our route handler
+// even runs, so an oversized upload comes back as a plain-text 413 rather
+// than JSON. We avoid that entirely by downscaling/recompressing the
+// photo client-side first; this also keeps the vision API call fast.
+async function loadDrawable(file: File): Promise<ImageBitmap | HTMLImageElement> {
+  if (typeof createImageBitmap === "function") {
+    try {
+      return await createImageBitmap(file);
+    } catch {
+      // fall through to <img> based loading (e.g. unsupported format)
+    }
+  }
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
-      const comma = result.indexOf(",");
-      resolve({ data: result.slice(comma + 1), mimeType: file.type || "image/jpeg" });
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
     };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
+    img.onerror = (e) => {
+      URL.revokeObjectURL(url);
+      reject(e);
+    };
+    img.src = url;
   });
+}
+
+async function compressImageFile(file: File): Promise<{ data: string; mimeType: string }> {
+  const drawable = await loadDrawable(file);
+  const naturalWidth = "width" in drawable ? drawable.width : 0;
+  const naturalHeight = "height" in drawable ? drawable.height : 0;
+
+  let maxDim = 1600;
+  let quality = 0.85;
+  const SAFE_BASE64_LENGTH = 3_000_000; // ~2.25MB decoded, well under the 4.5MB body limit
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const scale = Math.min(1, maxDim / Math.max(naturalWidth, naturalHeight, 1));
+    const w = Math.max(1, Math.round(naturalWidth * scale));
+    const h = Math.max(1, Math.round(naturalHeight * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("画像の処理に失敗しました(canvas未対応)。");
+    ctx.drawImage(drawable, 0, 0, w, h);
+    const dataUrl = canvas.toDataURL("image/jpeg", quality);
+    const comma = dataUrl.indexOf(",");
+    const base64 = dataUrl.slice(comma + 1);
+    if (base64.length <= SAFE_BASE64_LENGTH || attempt === 3) {
+      if ("close" in drawable) drawable.close();
+      return { data: base64, mimeType: "image/jpeg" };
+    }
+    maxDim = Math.round(maxDim * 0.75);
+    quality = Math.max(0.5, quality - 0.15);
+  }
+  throw new Error("画像の圧縮に失敗しました。");
+}
+
+// Reads a fetch Response as JSON, but degrades gracefully when the body
+// isn't JSON at all (e.g. Vercel's own plain-text error pages for 413/504),
+// which previously surfaced as an opaque "Unexpected token" parse error.
+async function safeJson(res: Response): Promise<any> {
+  const text = await res.text();
+  if (!text) {
+    throw new Error(`サーバーエラー (status ${res.status}): 応答が空でした。`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    const hint = res.status === 413 ? "写真のデータが大きすぎる可能性があります。" : "";
+    throw new Error(`サーバーエラー (status ${res.status})。${hint} ${text.slice(0, 200)}`.trim());
+  }
 }
 
 export default function Home() {
@@ -85,14 +149,16 @@ export default function Home() {
     setError(null);
     setBusy("digitize");
     try {
-      const { data, mimeType } = await fileToBase64(file);
+      const { data, mimeType } = await compressImageFile(file);
       const res = await fetch("/api/digitize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ imageBase64: data, mimeType }),
       });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || "盤面認識に失敗しました。");
+      const json = await safeJson(res);
+      if (!res.ok) {
+        throw new Error(`${json.error || "盤面認識に失敗しました。"}${json.requestId ? ` (ID: ${json.requestId})` : ""}`);
+      }
 
       const newBoard: Board = json.board;
       setDraftBoard(newBoard);
@@ -135,8 +201,10 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ board: draftBoard, mover: draftNextMover }),
       });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || "評価に失敗しました。");
+      const json = await safeJson(res);
+      if (!res.ok) {
+        throw new Error(`${json.error || "評価に失敗しました。"}${json.requestId ? ` (ID: ${json.requestId})` : ""}`);
+      }
 
       setConfirmedBoard(draftBoard);
       setLastMover(draftNextMover);
