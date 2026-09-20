@@ -312,7 +312,7 @@ export default function Home() {
             disabled={busy === "digitize"}
             className="px-4 py-2 rounded bg-emerald-700 text-white font-semibold hover:bg-emerald-800 disabled:opacity-50"
           >
-            {busy === "digitize" ? "読み取り中..." : "今の盤面を撮影して開始"}
+            {busy === "digitize" ? "読み取り中...(最大50秒ほどかかります)" : "今の盤面を撮影して開始"}
           </button>
           <button
             onClick={startManualEntry}
@@ -392,7 +392,7 @@ export default function Home() {
                 disabled={busy === "digitize"}
                 className="px-4 py-2 rounded bg-emerald-700 text-white font-semibold hover:bg-emerald-800 disabled:opacity-50"
               >
-                {busy === "digitize" ? "読み取り中..." : "石を置いたら撮影"}
+                {busy === "digitize" ? "読み取り中...(最大50秒ほどかかります)" : "石を置いたら撮影"}
               </button>
               <button
                 onClick={startManualEntry}

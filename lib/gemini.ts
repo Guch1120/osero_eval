@@ -39,7 +39,14 @@ interface GeneratePart {
 async function generateContent(
   model: string,
   parts: GeneratePart[],
-  opts: { systemInstruction?: string; jsonMode?: boolean; temperature?: number } = {}
+  opts: {
+    systemInstruction?: string;
+    jsonMode?: boolean;
+    temperature?: number;
+    timeoutMs?: number;
+    overallBudgetMs?: number;
+    maxAttempts?: number;
+  } = {}
 ): Promise<string> {
   const key = apiKey();
   const isGemma = model.startsWith("gemma");
@@ -73,9 +80,16 @@ async function generateContent(
   // the function with an opaque platform-level 504 (FUNCTION_INVOCATION_TIMEOUT)
   // instead of letting us return a clean JSON error (or, for the
   // explanation call, fall back to the non-LLM text).
-  const MAX_ATTEMPTS = 3;
-  const PER_ATTEMPT_TIMEOUT_MS = 15_000;
-  const OVERALL_BUDGET_MS = 25_000;
+  // Defaults suit the (fast, text-only) explanation call, which has a
+  // non-LLM fallback if it fails, so it's fine to fail fast. The vision
+  // call passes much larger values below: a 31B multimodal model can
+  // legitimately take 20-40s+ to process an image on shared free-tier
+  // capacity, and aborting it at 15s (as a fixed timeout previously did)
+  // just killed in-flight requests before they could finish, then repeated
+  // the same mistake on retry.
+  const MAX_ATTEMPTS = opts.maxAttempts ?? 3;
+  const PER_ATTEMPT_TIMEOUT_MS = opts.timeoutMs ?? 15_000;
+  const OVERALL_BUDGET_MS = opts.overallBudgetMs ?? 25_000;
   const startedAt = Date.now();
 
   let lastErrText = "";
@@ -88,8 +102,14 @@ async function generateContent(
       );
     }
 
+    // Cap this attempt's own timeout to whatever remains of the overall
+    // budget, so a slow attempt can never make total elapsed time exceed
+    // OVERALL_BUDGET_MS regardless of how many attempts are configured.
+    const remainingMs = OVERALL_BUDGET_MS - (Date.now() - startedAt);
+    const attemptTimeoutMs = Math.max(1000, Math.min(PER_ATTEMPT_TIMEOUT_MS, remainingMs));
+
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), PER_ATTEMPT_TIMEOUT_MS);
+    const timeoutId = setTimeout(() => controller.abort(), attemptTimeoutMs);
     let res: Response;
     try {
       res = await fetch(`${API_BASE}/models/${model}:generateContent?key=${key}`, {
@@ -102,7 +122,7 @@ async function generateContent(
       const timedOut = err instanceof Error && err.name === "AbortError";
       lastStatus = 0;
       lastErrText = timedOut
-        ? `request timed out after ${PER_ATTEMPT_TIMEOUT_MS}ms`
+        ? `request timed out after ${attemptTimeoutMs}ms`
         : err instanceof Error
           ? err.message
           : String(err);
@@ -205,7 +225,18 @@ export async function digitizeBoardFromPhoto(imageBase64: string, mimeType: stri
       { inlineData: { mimeType, data: imageBase64 } },
       { text: "この写真のオセロ盤面を読み取ってJSONで出力してください。" },
     ],
-    { systemInstruction: DIGITIZE_SYSTEM, jsonMode: true, temperature: 0.1 }
+    {
+      systemInstruction: DIGITIZE_SYSTEM,
+      jsonMode: true,
+      temperature: 0.1,
+      // A 31B multimodal model can genuinely take 20-40s+ to process an
+      // image on shared free-tier capacity. Give it one long window
+      // instead of two short ones that each get aborted before finishing
+      // (which is what a fixed 15s timeout was doing in practice).
+      timeoutMs: 48_000,
+      overallBudgetMs: 48_000,
+      maxAttempts: 2,
+    }
   );
   return parseDigitizeText(text);
 }
