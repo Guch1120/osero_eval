@@ -53,9 +53,19 @@ APIキーを設定しなくても、「現在の盤面を手動入力」から�
 簡易な自動生成テキストにフォールバックします。
 
 Gemmaのような無料の新しいオープンモデルは、需要が集中すると一時的に
-`503 UNAVAILABLE`(高負荷)を返すことがあります。そのため各APIコールは
-`GEMINI_VISION_FALLBACK_MODEL` / `GEMINI_TEXT_FALLBACK_MODEL`(デフォルトは
-どちらも `gemini-flash-latest`)に自動的にフォールバックします。
+`503 UNAVAILABLE`(高負荷)を返すことがあります。しかもこの高負荷は
+Gemmaと`gemini-flash-latest`の両方に同時に起きることもあるため、
+各APIコールは2段階のフォールバックを試みます。
+
+1. `GEMINI_VISION_FALLBACK_MODEL` / `GEMINI_TEXT_FALLBACK_MODEL`
+   (デフォルト `gemini-flash-latest`)
+2. `GEMINI_VISION_FALLBACK_MODEL_2` / `GEMINI_TEXT_FALLBACK_MODEL_2`
+   (デフォルト `gemini-flash-lite-latest`。Flashとは別の容量枠を持つ
+   軽量モデルなので、Flash系全体が混雑していても通ることがあります)
+
+それでも全モデルが失敗する場合は、数秒待って全モデルをもう一度
+一巡する、という処理を時間予算の範囲内で繰り返します(Googleの503
+エラーメッセージ自体が「高負荷は通常一時的」としているため)。
 
 **モデル名は固定の日付付き名称(`gemini-2.0-flash` など)ではなく
 `gemini-flash-latest` を使っています。** Googleは2026年に入ってから

@@ -38,10 +38,25 @@ export const TEXT_MODEL = process.env.GEMINI_TEXT_MODEL || VISION_MODEL;
 export const VISION_FALLBACK_MODEL = process.env.GEMINI_VISION_FALLBACK_MODEL || "gemini-flash-latest";
 export const TEXT_FALLBACK_MODEL = process.env.GEMINI_TEXT_FALLBACK_MODEL || VISION_FALLBACK_MODEL;
 
+// A second, distinct fallback tier: "high demand" 503s can affect a whole
+// model family at once (Gemma AND gemini-flash-latest both 503ed within
+// minutes of each other in practice), so a fallback chain needs more than
+// one alternative. Flash-Lite is a separate, smaller/cheaper model with
+// its own capacity pool and is also multimodal, so it's a reasonable third
+// option. Same "-latest" alias reasoning as above applies.
+export const VISION_FALLBACK_MODEL_2 = process.env.GEMINI_VISION_FALLBACK_MODEL_2 || "gemini-flash-lite-latest";
+export const TEXT_FALLBACK_MODEL_2 = process.env.GEMINI_TEXT_FALLBACK_MODEL_2 || VISION_FALLBACK_MODEL_2;
+
+// Distinguishes "this will never succeed no matter how many times or
+// which model we try" from ordinary transient failures, so the fallback
+// chain below can bail out immediately instead of burning its whole time
+// budget retrying a missing API key.
+class ConfigError extends Error {}
+
 function apiKey(): string {
   const key = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
   if (!key) {
-    throw new Error(
+    throw new ConfigError(
       "GOOGLE_API_KEY (or GEMINI_API_KEY) is not set. Get a free key at https://aistudio.google.com/apikey and set it in your environment."
     );
   }
@@ -173,24 +188,48 @@ async function generateContent(
 }
 
 // Tries each model in order, moving on to the next only if the previous
-// one fails outright (wrong model name, overloaded, timed out, etc.).
-// Each model gets its own fresh timeout/budget from `opts` — deliberately
-// not split across models, since a second attempt against a *different*
-// backend is far more likely to succeed than repeating the same call
-// against the one that's already struggling.
+// one fails outright (wrong model name, overloaded, timed out, etc.). A
+// "high demand" 503 has been observed hitting Gemma AND gemini-flash-latest
+// within minutes of each other, so a single pass through the model list
+// isn't always enough — if every model fails, this waits briefly and
+// cycles through the whole list again, as many times as fit in
+// `chainBudgetMs`. Google's own 503 message says these spikes are
+// "usually temporary", so a short wait-and-retry is worth it.
+//
+// Every attempt (any model, any pass) draws from the same overall
+// `chainBudgetMs` clock, so total wall-clock time is bounded regardless of
+// how many models or passes it takes — this is what keeps the calling
+// route safely under its `maxDuration` instead of risking a platform-level
+// timeout.
 async function generateContentWithFallback(
   models: string[],
   parts: GeneratePart[],
-  opts: Parameters<typeof generateContent>[2] = {}
+  opts: Parameters<typeof generateContent>[2] = {},
+  chainBudgetMs = 45_000
 ): Promise<string> {
+  const startedAt = Date.now();
   let lastErr: unknown;
-  for (const model of models) {
-    try {
-      return await generateContent(model, parts, opts);
-    } catch (err) {
-      lastErr = err;
+
+  while (Date.now() - startedAt < chainBudgetMs) {
+    for (const model of models) {
+      const remainingMs = chainBudgetMs - (Date.now() - startedAt);
+      if (remainingMs < 1500) break; // not enough time left for a meaningful attempt
+      try {
+        return await generateContent(model, parts, {
+          ...opts,
+          timeoutMs: Math.min(opts.timeoutMs ?? remainingMs, remainingMs),
+          overallBudgetMs: Math.min(opts.overallBudgetMs ?? remainingMs, remainingMs),
+        });
+      } catch (err) {
+        if (err instanceof ConfigError) throw err; // never fixed by retrying or switching models
+        lastErr = err;
+      }
     }
+    const remainingMs = chainBudgetMs - (Date.now() - startedAt);
+    if (remainingMs < 3000) break; // no room for another pass
+    await new Promise((r) => setTimeout(r, 2000));
   }
+
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
@@ -259,7 +298,7 @@ export function parseDigitizeText(raw: string): DigitizeResult {
 
 export async function digitizeBoardFromPhoto(imageBase64: string, mimeType: string): Promise<DigitizeResult> {
   const text = await generateContentWithFallback(
-    Array.from(new Set([VISION_MODEL, VISION_FALLBACK_MODEL])),
+    Array.from(new Set([VISION_MODEL, VISION_FALLBACK_MODEL, VISION_FALLBACK_MODEL_2])),
     [
       { inlineData: { mimeType, data: imageBase64 } },
       { text: "この写真のオセロ盤面を読み取ってJSONで出力してください。" },
@@ -269,15 +308,14 @@ export async function digitizeBoardFromPhoto(imageBase64: string, mimeType: stri
       jsonMode: true,
       temperature: 0.1,
       // A 31B multimodal model can genuinely take 20-40s+ to process an
-      // image on shared free-tier capacity, and can also 503 for stretches
-      // under high demand. Each model gets its own ~24s window (single
-      // attempt, no internal retry); if the primary is overloaded it
-      // typically fails fast, leaving most of the digitize route's 60s
-      // maxDuration for the fallback model to actually try.
-      timeoutMs: 24_000,
-      overallBudgetMs: 24_000,
+      // image on shared free-tier capacity. Cap any single attempt to 18s
+      // so a slow/hanging model can't eat the whole chain budget below;
+      // a real "high demand" 503 typically comes back in well under a
+      // second, leaving most of the budget for the next model/pass.
+      timeoutMs: 18_000,
       maxAttempts: 1,
-    }
+    },
+    45_000 // chainBudgetMs: leaves ~15s of headroom under the route's 60s maxDuration
   );
   return parseDigitizeText(text);
 }
@@ -317,14 +355,14 @@ ${payload}
 補足: mode が "exact" の場合、この先両者が最善を尽くした場合の確定的な結果(終盤までの読み切り)です。"heuristic" の場合は簡易評価関数による概算です。features の各値は「手番側にとって良いほどプラス」になるよう正規化されています(mobilityDiff=着手可能数の差, frontierDiff=相手に取られにくい石の割合の差, discDiff=石数の差, cornerDiff=角の獲得数の差)。`;
 
   return generateContentWithFallback(
-    Array.from(new Set([TEXT_MODEL, TEXT_FALLBACK_MODEL])),
+    Array.from(new Set([TEXT_MODEL, TEXT_FALLBACK_MODEL, TEXT_FALLBACK_MODEL_2])),
     [{ text: userText }],
     {
       systemInstruction: EXPLAIN_SYSTEM,
       temperature: 0.4,
-      timeoutMs: 10_000,
-      overallBudgetMs: 10_000,
+      timeoutMs: 8_000,
       maxAttempts: 1,
-    }
+    },
+    18_000 // chainBudgetMs: this call has a non-LLM fallback, so prefer failing fast
   );
 }
