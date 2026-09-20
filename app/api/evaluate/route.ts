@@ -1,25 +1,11 @@
 import { randomUUID } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { analyzePosition, BLACK, WHITE, type Board, type Player } from "@/lib/othello";
-import { explainPosition, type ExplainInput } from "@/lib/gemini";
-import { logError, logInfo, logWarn } from "@/lib/logger";
+import { buildExplanation, type ExplainInput } from "@/lib/explain";
+import { logInfo, logWarn } from "@/lib/logger";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
-
-function fallbackExplanation(input: ExplainInput): string {
-  const lead =
-    input.mode === "exact"
-      ? `終盤まで読み切った結果、${input.moverLabel}の手番でこの先最善を尽くすと黒${input.blackWinProbPct}%・白${input.whiteWinProbPct}%という確定的な結果になります。`
-      : `簡易評価による概算では、${input.moverLabel}の手番の局面は黒${input.blackWinProbPct}%・白${input.whiteWinProbPct}%です。`;
-  const f = input.features;
-  const points: string[] = [];
-  if (Math.abs(f.cornerDiff) > 0) points.push(`角の獲得数の差は${f.cornerDiff > 0 ? "手番側が有利" : "相手が有利"}(${f.cornerDiff})`);
-  if (Math.abs(f.mobilityDiff) > 10) points.push(`着手可能数は${f.mobilityDiff > 0 ? "手番側が優勢" : "相手が優勢"}`);
-  if (Math.abs(f.frontierDiff) > 10) points.push(`相手に取られにくい石の割合は${f.frontierDiff > 0 ? "手番側が良好" : "相手が良好"}`);
-  const bestPart = input.bestMoveNotation ? ` 最善手の候補は${input.bestMoveNotation}です。` : "";
-  return `${lead}${points.length ? points.join("。") + "。" : ""}${bestPart}`;
-}
+export const maxDuration = 15; // engine search alone is bounded to a few seconds; no external API calls here anymore
 
 export async function POST(req: NextRequest) {
   const requestId = randomUUID();
@@ -29,7 +15,7 @@ export async function POST(req: NextRequest) {
   try {
     body = await req.json();
   } catch (err) {
-    logError("evaluate", "request body was not valid JSON", err, { requestId });
+    logWarn("evaluate", "request body was not valid JSON", { requestId });
     return NextResponse.json({ error: "リクエストの形式が不正です。", requestId }, { status: 400 });
   }
 
@@ -78,21 +64,11 @@ export async function POST(req: NextRequest) {
     drawish: analysis.drawish,
   };
 
-  let explanation: string;
-  let explanationSource: "llm" | "fallback" = "llm";
-  try {
-    explanation = await explainPosition(explainInput);
-    logInfo("evaluate", "explanation generated via LLM", { requestId, elapsedMs: Date.now() - startedAt });
-  } catch (err) {
-    logError("evaluate", "LLM explanation failed, using fallback text", err, { requestId });
-    explanationSource = "fallback";
-    explanation = fallbackExplanation(explainInput);
-  }
+  const explanation = buildExplanation(explainInput);
 
   return NextResponse.json({
     analysis,
     explanation,
-    explanationSource,
     requestId,
   });
 }

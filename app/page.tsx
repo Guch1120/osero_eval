@@ -4,6 +4,8 @@ import { useRef, useState } from "react";
 import BoardGrid from "@/components/BoardGrid";
 import EvalBar from "@/components/EvalBar";
 import CameraCapture from "@/components/CameraCapture";
+import { capturedImageFromFile } from "@/lib/imageCapture";
+import { analyzeBoardImageData, type VisionAnalysis } from "@/lib/boardVision";
 import {
   BLACK,
   WHITE,
@@ -27,77 +29,15 @@ interface AnalysisResponse {
     candidates: { move: number; notation: string; score: number }[];
   };
   explanation: string;
-  explanationSource: "llm" | "fallback";
 }
 
 function playerLabel(p: Player): string {
   return p === BLACK ? "黒" : "白";
 }
 
-// Phone camera photos (often 4-12MB) are sent as base64 JSON, which adds
-// ~33% overhead and can exceed Vercel's ~4.5MB serverless request body
-// limit. That limit is enforced by the platform before our route handler
-// even runs, so an oversized upload comes back as a plain-text 413 rather
-// than JSON. We avoid that entirely by downscaling/recompressing the
-// photo client-side first; this also keeps the vision API call fast.
-async function loadDrawable(file: File): Promise<ImageBitmap | HTMLImageElement> {
-  if (typeof createImageBitmap === "function") {
-    try {
-      return await createImageBitmap(file);
-    } catch {
-      // fall through to <img> based loading (e.g. unsupported format)
-    }
-  }
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(img);
-    };
-    img.onerror = (e) => {
-      URL.revokeObjectURL(url);
-      reject(e);
-    };
-    img.src = url;
-  });
-}
-
-async function compressImageFile(file: File): Promise<{ data: string; mimeType: string }> {
-  const drawable = await loadDrawable(file);
-  const naturalWidth = "width" in drawable ? drawable.width : 0;
-  const naturalHeight = "height" in drawable ? drawable.height : 0;
-
-  let maxDim = 1600;
-  let quality = 0.85;
-  const SAFE_BASE64_LENGTH = 3_000_000; // ~2.25MB decoded, well under the 4.5MB body limit
-
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const scale = Math.min(1, maxDim / Math.max(naturalWidth, naturalHeight, 1));
-    const w = Math.max(1, Math.round(naturalWidth * scale));
-    const h = Math.max(1, Math.round(naturalHeight * scale));
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("画像の処理に失敗しました(canvas未対応)。");
-    ctx.drawImage(drawable, 0, 0, w, h);
-    const dataUrl = canvas.toDataURL("image/jpeg", quality);
-    const comma = dataUrl.indexOf(",");
-    const base64 = dataUrl.slice(comma + 1);
-    if (base64.length <= SAFE_BASE64_LENGTH || attempt === 3) {
-      if ("close" in drawable) drawable.close();
-      return { data: base64, mimeType: "image/jpeg" };
-    }
-    maxDim = Math.round(maxDim * 0.75);
-    quality = Math.max(0.5, quality - 0.15);
-  }
-  throw new Error("画像の圧縮に失敗しました。");
-}
-
 // Reads a fetch Response as JSON, but degrades gracefully when the body
-// isn't JSON at all (e.g. Vercel's own plain-text error pages for 413/504),
-// which previously surfaced as an opaque "Unexpected token" parse error.
+// isn't JSON at all (e.g. Vercel's own plain-text error pages for 5xx),
+// which would otherwise surface as an opaque "Unexpected token" parse error.
 async function safeJson(res: Response): Promise<any> {
   const text = await res.text();
   if (!text) {
@@ -106,8 +46,7 @@ async function safeJson(res: Response): Promise<any> {
   try {
     return JSON.parse(text);
   } catch {
-    const hint = res.status === 413 ? "写真のデータが大きすぎる可能性があります。" : "";
-    throw new Error(`サーバーエラー (status ${res.status})。${hint} ${text.slice(0, 200)}`.trim());
+    throw new Error(`サーバーエラー (status ${res.status})。${text.slice(0, 200)}`.trim());
   }
 }
 
@@ -168,41 +107,26 @@ export default function Home() {
     setError(null);
   }
 
-  async function submitPhotoForDigitize(data: string, mimeType: string) {
-    setError(null);
-    setBusy("digitize");
-    try {
-      const res = await fetch("/api/digitize", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageBase64: data, mimeType }),
-      });
-      const json = await safeJson(res);
-      if (!res.ok) {
-        throw new Error(`${json.error || "盤面認識に失敗しました。"}${json.requestId ? ` (ID: ${json.requestId})` : ""}`);
-      }
+  // Board digitization runs entirely on-device (lib/boardVision.ts, a
+  // classical grid-line + brightness classifier — no network call, no
+  // external API). This just applies the result to component state,
+  // shared by both the in-app camera and the file-picker fallback.
+  function applyVisionResult(analysis: VisionAnalysis) {
+    setDraftBoard(analysis.board);
+    setDigitizeNotes({ confidence: analysis.confidence, notes: analysis.notes });
 
-      const newBoard: Board = json.board;
-      setDraftBoard(newBoard);
-      setDigitizeNotes({ confidence: json.confidence, notes: json.notes });
-
-      if (confirmedBoard) {
-        const justMoved = inferMover(confirmedBoard, newBoard);
-        if (justMoved) {
-          setDraftNextMover(other(justMoved));
-          setMoverInferred(true);
-        } else {
-          setDraftNextMover(lastMover ? other(lastMover) : BLACK);
-          setMoverInferred(false);
-        }
+    if (confirmedBoard) {
+      const justMoved = inferMover(confirmedBoard, analysis.board);
+      if (justMoved) {
+        setDraftNextMover(other(justMoved));
+        setMoverInferred(true);
       } else {
-        setDraftNextMover(BLACK);
+        setDraftNextMover(lastMover ? other(lastMover) : BLACK);
         setMoverInferred(false);
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(null);
+    } else {
+      setDraftNextMover(BLACK);
+      setMoverInferred(false);
     }
   }
 
@@ -211,11 +135,15 @@ export default function Home() {
     e.target.value = "";
     if (!file) return;
     setError(null);
+    setBusy("digitize");
     try {
-      const { data, mimeType } = await compressImageFile(file);
-      await submitPhotoForDigitize(data, mimeType);
+      const captured = await capturedImageFromFile(file);
+      const analysis = analyzeBoardImageData(captured);
+      applyVisionResult(analysis);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -228,9 +156,9 @@ export default function Home() {
     }
   }
 
-  function handleCameraCapture(photo: { data: string; mimeType: string }) {
+  function handleCameraCapture(analysis: VisionAnalysis) {
     setShowCamera(false);
-    void submitPhotoForDigitize(photo.data, photo.mimeType);
+    applyVisionResult(analysis);
   }
 
   function cycleCell(i: number) {
@@ -312,7 +240,7 @@ export default function Home() {
             disabled={busy === "digitize"}
             className="px-4 py-2 rounded bg-emerald-700 text-white font-semibold hover:bg-emerald-800 disabled:opacity-50"
           >
-            {busy === "digitize" ? "読み取り中...(最大50秒ほどかかります)" : "今の盤面を撮影して開始"}
+            {busy === "digitize" ? "読み取り中..." : "今の盤面を撮影して開始"}
           </button>
           <button
             onClick={startManualEntry}
@@ -392,7 +320,7 @@ export default function Home() {
                 disabled={busy === "digitize"}
                 className="px-4 py-2 rounded bg-emerald-700 text-white font-semibold hover:bg-emerald-800 disabled:opacity-50"
               >
-                {busy === "digitize" ? "読み取り中...(最大50秒ほどかかります)" : "石を置いたら撮影"}
+                {busy === "digitize" ? "読み取り中..." : "石を置いたら撮影"}
               </button>
               <button
                 onClick={startManualEntry}
@@ -460,11 +388,6 @@ export default function Home() {
           <p className="text-sm leading-relaxed whitespace-pre-wrap bg-neutral-50 border border-neutral-200 rounded p-3">
             {result.explanation}
           </p>
-          {result.explanationSource === "fallback" && (
-            <p className="text-xs text-neutral-400">
-              ※ LLMによる解説の取得に失敗したため、数値のみから自動生成した簡易解説を表示しています。
-            </p>
-          )}
         </section>
       )}
     </main>
