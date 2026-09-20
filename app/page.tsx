@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import BoardGrid from "@/components/BoardGrid";
 import EvalBar from "@/components/EvalBar";
+import CameraCapture from "@/components/CameraCapture";
 import {
   BLACK,
   WHITE,
@@ -124,6 +125,7 @@ export default function Home() {
 
   const [busy, setBusy] = useState<"digitize" | "evaluate" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showCamera, setShowCamera] = useState(false);
 
   function startNewGame() {
     setConfirmedBoard(initialBoard());
@@ -142,14 +144,10 @@ export default function Home() {
     setError(null);
   }
 
-  async function onPhotoChosen(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
+  async function submitPhotoForDigitize(data: string, mimeType: string) {
     setError(null);
     setBusy("digitize");
     try {
-      const { data, mimeType } = await compressImageFile(file);
       const res = await fetch("/api/digitize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -182,6 +180,33 @@ export default function Home() {
     } finally {
       setBusy(null);
     }
+  }
+
+  async function onPhotoChosen(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setError(null);
+    try {
+      const { data, mimeType } = await compressImageFile(file);
+      await submitPhotoForDigitize(data, mimeType);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function openCameraOrFilePicker() {
+    setError(null);
+    if (typeof navigator !== "undefined" && typeof navigator.mediaDevices?.getUserMedia === "function") {
+      setShowCamera(true);
+    } else {
+      fileInputRef.current?.click();
+    }
+  }
+
+  function handleCameraCapture(photo: { data: string; mimeType: string }) {
+    setShowCamera(false);
+    void submitPhotoForDigitize(photo.data, photo.mimeType);
   }
 
   function cycleCell(i: number) {
@@ -239,6 +264,17 @@ export default function Home() {
         onChange={onPhotoChosen}
       />
 
+      {showCamera && (
+        <CameraCapture
+          onCapture={handleCameraCapture}
+          onCancel={() => setShowCamera(false)}
+          onFallbackToFile={() => {
+            setShowCamera(false);
+            fileInputRef.current?.click();
+          }}
+        />
+      )}
+
       {!confirmedBoard && !draftBoard && (
         <div className="flex flex-wrap gap-3">
           <button
@@ -248,7 +284,7 @@ export default function Home() {
             初期配置から開始
           </button>
           <button
-            onClick={() => fileInputRef.current?.click()}
+            onClick={openCameraOrFilePicker}
             disabled={busy === "digitize"}
             className="px-4 py-2 rounded bg-emerald-700 text-white font-semibold hover:bg-emerald-800 disabled:opacity-50"
           >
@@ -328,7 +364,7 @@ export default function Home() {
           {!draftBoard && confirmedBoard && (
             <div className="flex flex-wrap gap-3">
               <button
-                onClick={() => fileInputRef.current?.click()}
+                onClick={openCameraOrFilePicker}
                 disabled={busy === "digitize"}
                 className="px-4 py-2 rounded bg-emerald-700 text-white font-semibold hover:bg-emerald-800 disabled:opacity-50"
               >

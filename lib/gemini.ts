@@ -62,23 +62,38 @@ async function generateContent(
     body.systemInstruction = { role: "system", parts: [{ text: opts.systemInstruction }] };
   }
 
-  const res = await fetch(`${API_BASE}/models/${model}:generateContent?key=${key}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  // The hosted Gemma endpoints occasionally return a bare 500 "Internal
+  // error" under load; that's transient, so retry a couple of times with
+  // backoff before giving up. Client errors (4xx, e.g. unknown model,
+  // bad request) are not retried since retrying can't fix those.
+  const MAX_ATTEMPTS = 3;
+  let lastErrText = "";
+  let lastStatus = 0;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const res = await fetch(`${API_BASE}/models/${model}:generateContent?key=${key}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
 
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(`Gemini API error (${res.status}) for model ${model}: ${errText.slice(0, 500)}`);
-  }
+    if (res.ok) {
+      const data = await res.json();
+      const text =
+        data?.candidates?.[0]?.content?.parts?.map((p: GeneratePart) => p.text ?? "").join("") ?? "";
+      if (!text) {
+        throw new Error(`Gemini API returned no text for model ${model}: ${JSON.stringify(data).slice(0, 500)}`);
+      }
+      return text;
+    }
 
-  const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.map((p: GeneratePart) => p.text ?? "").join("") ?? "";
-  if (!text) {
-    throw new Error(`Gemini API returned no text for model ${model}: ${JSON.stringify(data).slice(0, 500)}`);
+    lastStatus = res.status;
+    lastErrText = await res.text().catch(() => "");
+    if (res.status < 500 || attempt === MAX_ATTEMPTS) {
+      throw new Error(`Gemini API error (${res.status}) for model ${model}: ${lastErrText.slice(0, 500)}`);
+    }
+    await new Promise((r) => setTimeout(r, 400 * attempt));
   }
-  return text;
+  throw new Error(`Gemini API error (${lastStatus}) for model ${model}: ${lastErrText.slice(0, 500)}`);
 }
 
 // ---------------------------------------------------------------------
@@ -148,8 +163,8 @@ export async function digitizeBoardFromPhoto(imageBase64: string, mimeType: stri
   const text = await generateContent(
     VISION_MODEL,
     [
-      { text: "この写真のオセロ盤面を読み取ってJSONで出力してください。" },
       { inlineData: { mimeType, data: imageBase64 } },
+      { text: "この写真のオセロ盤面を読み取ってJSONで出力してください。" },
     ],
     { systemInstruction: DIGITIZE_SYSTEM, jsonMode: true, temperature: 0.1 }
   );
